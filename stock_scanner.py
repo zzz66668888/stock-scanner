@@ -1104,70 +1104,95 @@ def predict_next_day(df, indicators):
                     f"涨跌概率: 上涨{up_prob}% vs 下跌{down_prob}%。")
     }
 
-def analyze_t0_trading(df, indicators):
-    """日内做T分析：基于枢轴点和ATR计算做T买卖节点"""
+def analyze_t0_trading(df, indicators, cur_time=None):
+    """做T分析：盘中=当日做T，盘后=次日做T计划"""
     close = df['close']; high = df['high']; low = df['low']
     cur = float(close.iloc[-1])
 
-    # 用前一日OHLC计算标准枢轴点
-    y_h = float(high.iloc[-2]); y_l = float(low.iloc[-2]); y_c = float(close.iloc[-2])
-    pivot = round((y_h + y_l + y_c) / 3, 2)
-    r1 = round(2*pivot - y_l, 2); r2 = round(pivot + (y_h - y_l), 2)
-    s1 = round(2*pivot - y_h, 2); s2 = round(pivot - (y_h - y_l), 2)
+    # 判断当前时段
+    now = cur_time or datetime.now()
+    is_trading = False
+    if now.weekday() < 5:
+        t = now.hour * 60 + now.minute
+        if (570 <= t <= 690) or (780 <= t <= 900):  # 9:30-11:30 or 13:00-15:00
+            is_trading = True
 
-    # 日内波动预期(近5日平均振幅)
-    amps = [(float(high.iloc[i])/float(low.iloc[i])-1)*100 for i in range(-6, -1) if float(low.iloc[i])>0]
-    avg_amp = round(np.mean(amps), 2) if amps else 3.0
+    if is_trading:
+        # === 盘中：当日做T ===
+        # 用昨日OHLC做枢轴
+        mode = 'intraday'
+        ref_h = float(high.iloc[-2]); ref_l = float(low.iloc[-2]); ref_c = float(close.iloc[-2])
+        ref_label = '昨日'
+        pivot = round((ref_h + ref_l + ref_c) / 3, 2)
+        r1 = round(2*pivot - ref_l, 2); r2 = round(pivot + (ref_h - ref_l), 2)
+        s1 = round(2*pivot - ref_h, 2); s2 = round(pivot - (ref_h - ref_l), 2)
+
+        # 当前价格位置判断
+        if cur > r1: pos = f"当前价{cur}已突破R1({r1})，强势运行"; pos_cls = 'bullish'
+        elif cur > pivot: pos = f"当前价{cur}在枢轴{pivot}上方，偏多"; pos_cls = 'bullish'
+        elif cur > s1: pos = f"当前价{cur}在枢轴{pivot}下方，偏弱"; pos_cls = 'bearish'
+        elif cur > s2: pos = f"当前价{cur}已跌破S1({s1})，弱势运行"; pos_cls = 'bearish'
+        else: pos = f"当前价{cur}跌破S2({s2})，极度弱势"; pos_cls = 'bearish'
+
+        buy_points = [
+            {'price': round(s1,2), 'label': 'S1枢轴支撑', 'desc': f'回落至{s1}不破可做T买入'},
+            {'price': round(ref_c,2), 'label': '昨日收盘价', 'desc': f'回踩{ref_c}获支撑后买入'},
+            {'price': round(s2,2), 'label': 'S2极限支撑', 'desc': f'急跌至{s2}是抄底做T良机'},
+        ]
+        sell_points = [
+            {'price': round(r1,2), 'label': 'R1枢轴阻力', 'desc': f'反弹至{r1}无力突破则卖出'},
+            {'price': round(ref_h,2), 'label': '昨日最高点', 'desc': f'触及{ref_h}附近减仓'},
+            {'price': round(r2,2), 'label': 'R2强阻力', 'desc': f'冲至{r2}大概率回落，做T清仓'},
+        ]
+
+        t0_advice = (f"【盘中做T·当日】{pos}。"
+                     f"做T买入参考S1({s1})，卖出参考R1({r1})。"
+                     f"若跌破S2({s2})止损，突破R2({r2})可追多。注意14:30后减少操作以防尾盘波动。")
+
+    else:
+        # === 盘后：次日做T计划 ===
+        mode = 'next_day'
+        # 用今日OHLC计算明日枢轴
+        ref_h = float(high.iloc[-1]); ref_l = float(low.iloc[-1]); ref_c = float(close.iloc[-1])
+        ref_label = '今日'
+        pivot = round((ref_h + ref_l + ref_c) / 3, 2)
+        r1 = round(2*pivot - ref_l, 2); r2 = round(pivot + (ref_h - ref_l), 2)
+        s1 = round(2*pivot - ref_h, 2); s2 = round(pivot - (ref_h - ref_l), 2)
+
+        buy_points = [
+            {'price': round(s1,2), 'label': 'S1明日支撑', 'desc': f'明日若回踩{s1}不破可做T买入'},
+            {'price': round(ref_c,2), 'label': '今日收盘价', 'desc': f'回踩{ref_c}企稳后可买'},
+            {'price': round(s2,2), 'label': 'S2强支撑', 'desc': f'若急跌至{s2}是次日做T好买点'},
+        ]
+        sell_points = [
+            {'price': round(r1,2), 'label': 'R1明日阻力', 'desc': f'明日冲至{r1}若量能不济则卖'},
+            {'price': round(ref_h,2), 'label': '今日最高点', 'desc': f'触及今日高点{ref_h}附近减仓'},
+            {'price': round(r2,2), 'label': 'R2强阻力', 'desc': f'冲至{r2}大概率回落，做T离场'},
+        ]
+
+        t0_advice = (f"【次日做T计划】基于{ref_label}数据计算明日枢轴={pivot}。"
+                     f"明日若开盘在枢轴上方则偏多，回踩S1({s1})买入、冲高R1({r1})卖出。"
+                     f"若开盘在枢轴下方则偏空，反弹R1({r1})减仓、急跌S2({s2})抄底。止损设于S2({s2})下方。")
 
     # ATR
     tr = pd.DataFrame({'hl':high-low,'hpc':abs(high-close.shift(1)),'lpc':abs(low-close.shift(1))}).max(axis=1)
     atr = float(tr.tail(14).mean())
     atr_pct = round(atr/cur*100, 2)
 
-    # === 做T买入点 ===
-    buy_points = []
-    # B1: 开盘回踩S1
-    buy_points.append({'price': round(s1, 2), 'label': '回踩S1枢轴支撑', 'action': '买入/加仓',
-                       'strength': '较强', 'desc': f'若开盘回踩{s1}不破可做T买入'})
-    # B2: 回踩前日收盘价
-    buy_points.append({'price': round(y_c, 2), 'label': '回踩昨日收盘价', 'action': '买入/加仓',
-                       'strength': '中等', 'desc': f'回踩{y_c}确认支撑后做T买入'})
-    # B3: 回踩分时均价线附近
-    ma5_val = float(ma(close,5).iloc[-1])
-    buy_points.append({'price': round(ma5_val, 2), 'label': '回踩5日均线', 'action': '买入/加仓',
-                       'strength': '中等', 'desc': f'回踩MA5({ma5_val})不破可轻仓做T'})
-    # B4: 急跌至S2
-    buy_points.append({'price': round(s2, 2), 'label': '急跌至S2极限支撑', 'action': '重仓买入',
-                       'strength': '极强', 'desc': f'恐慌杀至{s2}是绝佳做T买点，但需快进快出'})
+    # 振幅
+    amps = [(float(high.iloc[i])/float(low.iloc[i])-1)*100 for i in range(-6, -1) if float(low.iloc[i])>0]
+    avg_amp = round(np.mean(amps), 2) if amps else 3.0
 
-    # === 做T卖出点 ===
-    sell_points = []
-    sell_points.append({'price': round(r1, 2), 'label': '冲高至R1枢轴阻力', 'action': '卖出/减仓',
-                        'strength': '较强', 'desc': f'反弹至{r1}若量能不足应做T卖出'})
-    sell_points.append({'price': round(y_h, 2), 'label': '触及昨日最高价', 'action': '卖出/减仓',
-                        'strength': '中等', 'desc': f'反弹至昨日高点{y_h}附近可减仓'})
-    sell_points.append({'price': round(r2, 2), 'label': '冲高至R2强阻力', 'action': '清仓卖出',
-                        'strength': '强', 'desc': f'冲至{r2}为强阻力，大概率回落，建议做T清仓'})
-    sell_points.append({'price': round(cur + atr*1.5, 2), 'label': 'ATR极端上沿', 'action': '减仓',
-                        'strength': '参考', 'desc': '日内涨幅达1.5倍ATR时大概率回落'})
-
-    # 做T空间估算
-    t0_buy = s1 if s1 < cur else buy_points[1]['price']
-    t0_sell = r1 if r1 > cur else sell_points[0]['price']
+    # 做T空间
+    t0_buy = s1 if s1 < cur else (buy_points[0]['price'] if buy_points else cur)
+    t0_sell = r1 if r1 > cur else (sell_points[0]['price'] if sell_points else cur)
     t0_space = round((t0_sell/t0_buy - 1)*100, 2) if t0_buy > 0 and t0_sell > t0_buy else round(avg_amp*0.4, 2)
     t0_risk = round(atr_pct * 0.5, 2)
 
-    # 操作建议
-    if cur < pivot:
-        t0_advice = f"当前价{cur}低于枢轴{pivot}，偏空。做T策略：等待回踩S1({s1})附近买入，反弹至枢轴({pivot})或R1({r1})卖出。预期空间约{t0_space}%，止损设于S2({s2})。"
-    elif cur > pivot:
-        t0_advice = f"当前价{cur}高于枢轴{pivot}，偏多。做T策略：若开盘冲高至R1({r1})可先卖出，待回踩枢轴({pivot})接回。预期空间约{t0_space}%，止损设于开盘价下方{atr_pct*0.5}%。"
-    else:
-        t0_advice = f"当前价在枢轴附近。做T策略：等待突破R1({r1})追多或跌破S1({s1})抄底。预期空间约{t0_space}%。"
-
     return {
+        'mode': mode, 'is_trading': is_trading,
         'pivot': pivot, 'r1': r1, 'r2': r2, 's1': s1, 's2': s2,
-        'avg_amplitude': avg_amp, 'atr_pct': atr_pct,
+        'ref_label': ref_label, 'avg_amplitude': avg_amp, 'atr_pct': atr_pct,
         'buy_points': buy_points, 'sell_points': sell_points,
         't0_space': t0_space, 't0_risk': t0_risk,
         'advice': t0_advice,
@@ -1748,8 +1773,10 @@ def fetch_board_and_peers(code, industry_name):
             for s in stock_list:
                 if len(peers_found) >= 4: break
                 if s['code'] == code: continue
-                kw = industry_name[:2] if len(industry_name) >= 2 else industry_name
-                if kw in s.get('name', '') or (len(code)>=3 and s['code'][:3] == code[:3]):
+                # 用完整行业名匹配(不用代码段)
+                ind_full = industry_name.replace('行业','').replace('制造','').strip()
+                ind_kws = [ind_full] + ([ind_full[:2]] if len(ind_full)>=3 else [])
+                if any(k in s.get('name', '') for k in ind_kws):
                     # 快速获取近5日价格
                     p = 0; chg5 = 0; chg20 = 0; trend = '-'
                     try:
@@ -2348,7 +2375,7 @@ async function analyzeOne(){
     let t0=d.t0_trading||{};
     if(t0.pivot){
       h+=`<div style="background:linear-gradient(135deg,rgba(63,185,80,.06),rgba(248,81,73,.06));border:1px solid rgba(63,185,80,.2);border-radius:10px;padding:16px;margin-top:16px">
-        <h4 style="margin:0 0 10px;font-size:.85rem;color:var(--gn)">📊 日内做T分析 (T+0)</h4>
+        <h4 style="margin:0 0 10px;font-size:.85rem;color:var(--gn)">📊 ${t0.mode==='intraday'?'盘中做T·当日':'盘后做T·次日'} (T+0) <span style="font-size:.7rem;color:var(--tx2)">基于${t0.ref_label||''}数据</span></h4>
         <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:10px">
           <div style="text-align:center;background:var(--bg);border-radius:8px;padding:8px"><div style="font-size:.7rem;color:var(--tx2)">枢轴P</div><div style="font-weight:700">${t0.pivot}</div></div>
           <div style="text-align:center;background:var(--bg);border-radius:8px;padding:8px"><div style="font-size:.7rem;color:var(--rd)">阻力R1/R2</div><div style="font-weight:700;color:var(--rd)">${t0.r1}/${t0.r2}</div></div>
