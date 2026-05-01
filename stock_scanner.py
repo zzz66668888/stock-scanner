@@ -2454,7 +2454,8 @@ ss('ok','就绪');
 </script></body></html>"""
 
 if __name__ == '__main__':
-    port = int(sys.argv[1]) if len(sys.argv)>1 else 5000
+    import os
+    port = int(os.environ.get('PORT', 5000))
     print(f"""
 ╔══════════════════════════════════════════════════════╗
 ║  📊 股票技术形态自动扫描系统 v5.2                   ║
