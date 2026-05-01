@@ -1736,6 +1736,32 @@ def fetch_fundamental_data(code, market='A'):
 
     return result
 
+def _quick_fetch_peer_price(code_str):
+    """快速获取一只股票的价格和涨跌"""
+    try:
+        bs_c = f'sh.{code_str}' if code_str.startswith('6') else f'sz.{code_str}'
+        ed = datetime.now().strftime('%Y-%m-%d')
+        sd = (datetime.now() - timedelta(days=80)).strftime('%Y-%m-%d')
+        rs = bs.query_history_k_data_plus(bs_c, 'date,close,volume', start_date=sd, end_date=ed, frequency='d', adjustflag='2')
+        if rs.error_code != '0': return None
+        d = rs.get_data()
+        if d is None or len(d) < 5: return None
+        c = [float(x) for x in d['close']]
+        p, chg5, chg20, chg60 = c[-1], 0, 0, 0
+        if len(c) >= 6: chg5 = round((c[-1]/c[-6]-1)*100, 2)
+        if len(c) >= 2: chg20 = round((c[-1]/c[0]-1)*100, 2)
+        chg60 = round((c[-1]/c[0]-1)*100, 2)
+        trend = '-'; vol_level = '-'
+        if len(c) >= 20:
+            m20 = sum(c[-20:])/20
+            trend = '上升' if (p > m20 and chg5 > 0) else ('下降' if p < m20 else '盘整')
+        if 'volume' in d.columns and len(d) >= 20:
+            vols = [float(x) for x in d['volume']]
+            vr = (sum(vols[-5:])/5)/(sum(vols[-20:])/20) if sum(vols[-20:])>0 else 1
+            vol_level = '放量' if vr>1.3 else ('缩量' if vr<0.7 else '正常')
+        return {'price': round(p,2), 'chg_5d': chg5, 'chg_20d': chg20, 'chg_60d': chg60, 'trend': trend, 'vol_level': vol_level}
+    except: return None
+
 def fetch_board_and_peers(code, industry_name):
     """获取股票所属板块指数和同行业可比公司"""
     result = {'boards': [], 'indexes': [], 'peers': []}
@@ -1764,59 +1790,47 @@ def fetch_board_and_peers(code, industry_name):
                 pass
     except: pass
 
-    # 3. 同行业可比公司(快速价格查询)
+    # 3. 同行业可比公司
     if industry_name:
+        # 构建关键词
+        ind_clean = industry_name.replace('行业','').replace('制造','').replace('材料','').replace('股份','').replace('科技','').strip()
+        all_kws = {ind_clean}
+        if len(ind_clean) >= 2: all_kws.add(ind_clean[:2])
+        if result.get('industry_detail'):
+            for part in result['industry_detail'].split(' → '):
+                p = part.replace('行业','').strip()
+                if p and len(p) >= 2: all_kws.add(p)
         try:
             stock_list = fetch_a_stock_list()
             peers_found = []
+            # 策略1: 股票名称含行业关键词
             for s in stock_list:
                 if len(peers_found) >= 6: break
                 if s['code'] == code: continue
-                # 用行业关键词匹配(完整名+前2字+单字+上级行业)
-                ind_clean = industry_name.replace('行业','').replace('制造','').replace('材料','').replace('股份','').replace('科技','').strip()
-                all_kws = {ind_clean}
-                if len(ind_clean) >= 2: all_kws.add(ind_clean[:2])
-                if result.get('industry_detail'):
-                    for part in result['industry_detail'].split(' → '):
-                        p = part.replace('行业','').strip()
-                        if p and len(p) >= 2: all_kws.add(p)
-                if any(k and k in s.get('name', '') for k in all_kws if k):
-                    p = 0; chg5 = 0; chg20 = 0; chg60 = 0; trend = '-'; vol_level = '-'
+                if not any(k and k in s.get('name', '') for k in all_kws if k): continue
+                metrics = _quick_fetch_peer_price(s['code'])
+                if metrics:
+                    peers_found.append({'code': s['code'], 'name': s['name'], **metrics})
+            # 策略2: 不够则采样验证行业
+            if len(peers_found) < 3:
+                sample = [s for s in stock_list[:120] if s['code'] != code and not any(p['code']==s['code'] for p in peers_found)]
+                for s in sample:
+                    if len(peers_found) >= 6: break
                     try:
-                        short_code = s['code']
-                        bs_c = f'sh.{short_code}' if short_code.startswith('6') else f'sz.{short_code}'
-                        ed = datetime.now().strftime('%Y-%m-%d')
-                        sd = (datetime.now() - timedelta(days=80)).strftime('%Y-%m-%d')
-                        rs = bs.query_history_k_data_plus(bs_c, 'date,close,volume', start_date=sd, end_date=ed, frequency='d', adjustflag='2')
+                        sub_bs = f'sh.{s["code"]}' if s['code'].startswith('6') else f'sz.{s["code"]}'
+                        rs = bs.query_stock_industry(sub_bs)
                         if rs.error_code == '0':
-                            dd = rs.get_data()
-                            if dd is not None and len(dd) >= 5:
-                                closes = [float(x) for x in dd['close']]
-                                p = closes[-1]
-                                chg5 = round((closes[-1]/closes[-6]-1)*100, 2) if len(closes)>=6 else 0
-                                chg20 = round((closes[-1]/max(closes[0], 0.01)-1)*100, 2) if len(closes)>=2 else 0
-                                chg60 = round((closes[-1]/max(closes[0], 0.01)-1)*100, 2) if len(closes)>0 else 0
-                                if len(closes) >= 20:
-                                    m20 = sum(closes[-20:])/20
-                                    if p > m20: trend = '上升' if chg5 > 0 else '盘整'
-                                    else: trend = '下降' if chg5 < 0 else '盘整'
-                                # 量能等级
-                                if 'volume' in dd.columns and len(dd)>=10:
-                                    vols = [float(x) for x in dd['volume']]
-                                    v5 = sum(vols[-5:])/5
-                                    v20 = sum(vols[-20:])/20 if len(vols)>=20 else v5
-                                    if v20 > 0:
-                                        vr = v5/v20
-                                        vol_level = '放量' if vr>1.3 else '缩量' if vr<0.7 else '正常'
+                            while rs.next():
+                                r2 = rs.get_row_data()
+                                if len(r2) >= 5 and any(kw and len(kw)>=2 and kw in str(r2[3]) for kw in all_kws if kw):
+                                    metrics = _quick_fetch_peer_price(s['code'])
+                                    if metrics:
+                                        peers_found.append({'code': s['code'], 'name': s['name'], **metrics})
+                                break
                     except: pass
-                    peers_found.append({
-                        'code': s['code'], 'name': s['name'],
-                        'price': round(p, 2), 'chg_5d': chg5, 'chg_20d': chg20,
-                        'chg_60d': chg60, 'trend': trend, 'vol_level': vol_level
-                    })
             if peers_found:
                 result['peers'] = peers_found
-                result['industry_note'] = f"以下{len(peers_found)}家公司同属{industry_name}领域，附多维对比"
+                result['industry_note'] = f"以下{len(peers_found)}家公司同属「{industry_name}」行业，附多维对比"
         except: pass
 
     return result
