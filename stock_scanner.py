@@ -1552,15 +1552,14 @@ def fetch_fundamental_data(code, market='A'):
             inds = []
             while rs.next():
                 row = rs.get_row_data()
-                if len(row) >= 3:
-                    inds.append({'code': row[0], 'name': row[1], 'type': row[2]})
+                # baostock字段: updateDate, code, code_name, industry, industryClassification
+                if len(row) >= 5:
+                    inds.append({'code': row[1], 'name': row[3], 'type': row[4]})
             if inds:
-                # 取最细分的行业
                 result['industry'] = inds[-1]['name']
                 result['industry_detail'] = ' → '.join([i['name'] for i in inds])
-                # 主营业务推断
                 if len(inds) >= 2:
-                    result['main_business'] = f"所属{inds[-2]['name']}板块，主营{inds[-1]['name']}相关业务"
+                    result['main_business_industry'] = f"所属{inds[-2]['name']}板块，主营{inds[-1]['name']}相关业务"
     except:
         pass
 
