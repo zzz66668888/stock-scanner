@@ -655,6 +655,16 @@ def analyze_stock(stock, market='A', patterns=None):
 def index():
     return HTML_PAGE
 
+@app.route('/api/health')
+def api_health():
+    """快速健康检查"""
+    ok = True
+    try: bs.login(); bs_ok = True
+    except: bs_ok = False; ok = False
+    try: sl = fetch_a_stock_list(); list_ok = len(sl)>0
+    except: list_ok = False; ok = False
+    return jsonify({'ok': ok, 'baostock': bs_ok, 'stock_list': list_ok, 'stock_count': len(sl) if list_ok else 0})
+
 @app.route('/api/test')
 def api_test():
     results = {}; t0 = time.time()
@@ -1292,8 +1302,8 @@ def analyze_position(code, market, buy_price, shares, cur_price, indicators, tar
     ma20_v = indicators.get('ma20', cur)
     ma60_v = indicators.get('ma60', cur)
 
-    # 日预期波动(简化：用3%作为基准，根据RSI调整)
-    daily_move = 2.5 + abs(rsi_v - 50) * 0.03  # 约2.5%-4%
+    # 日预期波动(基准1.8%，根据RSI偏离调整，范围1.5%-2.8%)
+    daily_move = 1.8 + abs(rsi_v - 50) * 0.02
 
     result = {
         'code': code, 'market': market,
@@ -1370,11 +1380,15 @@ def analyze_position(code, market, buy_price, shares, cur_price, indicators, tar
     # === 策略4: 止损方案 ===
     stop_price = round(buy_price * 0.93, 2)
     stop_loss_val = round((stop_price - buy_price) * shares, 2)
+    if cur > stop_price:
+        stop_note = f'当前距止损位还有{round((cur/stop_price-1)*100,1)}%空间'
+    else:
+        stop_note = f'当前价已跌破止损位！建议立即止损'
     result['strategies'].append({
         'type': '止损', 'label': '硬止损(-7%)',
         'stop_price': stop_price, 'stop_loss': stop_loss_val,
-        'action': f"若跌破{stop_price}元(亏损{stop_loss_val:.0f}元)，建议无条件止损离场，保留本金等待更好机会",
-        'time_note': f'当前距止损位{round((cur/stop_price-1)*100,1)}%'
+        'action': f"若跌破{stop_price}元(亏损{stop_loss_val:.0f}元)，建议无条件止损离场",
+        'time_note': stop_note
     })
 
     # 综合建议
