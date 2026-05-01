@@ -1781,30 +1781,38 @@ def fetch_board_and_peers(code, industry_name):
                         p = part.replace('行业','').strip()
                         if p and len(p) >= 2: all_kws.add(p)
                 if any(k and k in s.get('name', '') for k in all_kws if k):
-                    # 快速获取近5日价格
-                    p = 0; chg5 = 0; chg20 = 0; trend = '-'
+                    p = 0; chg5 = 0; chg20 = 0; chg60 = 0; trend = '-'; vol_level = '-'
                     try:
                         short_code = s['code']
                         bs_c = f'sh.{short_code}' if short_code.startswith('6') else f'sz.{short_code}'
                         ed = datetime.now().strftime('%Y-%m-%d')
-                        sd = (datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d')
-                        rs = bs.query_history_k_data_plus(bs_c, 'date,close', start_date=sd, end_date=ed, frequency='d', adjustflag='2')
+                        sd = (datetime.now() - timedelta(days=80)).strftime('%Y-%m-%d')
+                        rs = bs.query_history_k_data_plus(bs_c, 'date,close,volume', start_date=sd, end_date=ed, frequency='d', adjustflag='2')
                         if rs.error_code == '0':
                             dd = rs.get_data()
                             if dd is not None and len(dd) >= 5:
                                 closes = [float(x) for x in dd['close']]
                                 p = closes[-1]
                                 chg5 = round((closes[-1]/closes[-6]-1)*100, 2) if len(closes)>=6 else 0
-                                chg20 = round((closes[-1]/closes[0]-1)*100, 2) if len(closes)>=2 else 0
-                                # 趋势
+                                chg20 = round((closes[-1]/max(closes[0], 0.01)-1)*100, 2) if len(closes)>=2 else 0
+                                chg60 = round((closes[-1]/max(closes[0], 0.01)-1)*100, 2) if len(closes)>0 else 0
                                 if len(closes) >= 20:
-                                    ma20 = sum(closes[-20:])/20
-                                    if closes[-1] > ma20: trend = '上升' if chg5 > 0 else '盘整'
+                                    m20 = sum(closes[-20:])/20
+                                    if p > m20: trend = '上升' if chg5 > 0 else '盘整'
                                     else: trend = '下降' if chg5 < 0 else '盘整'
+                                # 量能等级
+                                if 'volume' in dd.columns and len(dd)>=10:
+                                    vols = [float(x) for x in dd['volume']]
+                                    v5 = sum(vols[-5:])/5
+                                    v20 = sum(vols[-20:])/20 if len(vols)>=20 else v5
+                                    if v20 > 0:
+                                        vr = v5/v20
+                                        vol_level = '放量' if vr>1.3 else '缩量' if vr<0.7 else '正常'
                     except: pass
                     peers_found.append({
                         'code': s['code'], 'name': s['name'],
-                        'price': round(p, 2), 'chg_5d': chg5, 'chg_20d': chg20, 'trend': trend
+                        'price': round(p, 2), 'chg_5d': chg5, 'chg_20d': chg20,
+                        'chg_60d': chg60, 'trend': trend, 'vol_level': vol_level
                     })
             if peers_found:
                 result['peers'] = peers_found
@@ -2258,20 +2266,22 @@ async function analyzeOne(){
       if(board.peers&&board.peers.length){
         // 把当前股票也加入对比表
         // 当前股票也加入对比(用基本面数据的财务指标)
-        let selfData={code:d.code,name:d.name||code,price:d.indicators.price,chg_5d:d.indicators.change_pct,chg_20d:sit.chg_20d||0,trend:sit.tech_phase||'当前',is_self:true,revenue:fund.revenue,profit:fund.net_profit};
+        let selfData={code:d.code,name:d.name||code,price:d.indicators.price,chg_5d:d.indicators.change_pct,chg_20d:sit.chg_20d||0,chg_60d:sit.chg_60d||0,trend:'当前',vol_level:'-',is_self:true,revenue:fund.revenue,profit:fund.net_profit};
         let allPeers=[selfData,...board.peers];
-        h+=`<div style="overflow-x:auto;margin-top:8px"><table style="width:100%;font-size:.75rem;border-collapse:collapse"><thead><tr style="background:var(--bg)"><th>代码</th><th>名称</th><th>现价</th><th>近5日</th><th>近20日</th><th>趋势</th><th>营收</th><th>净利</th></tr></thead><tbody>`;
-        allPeers.forEach(p=>{
+        h+=`<div style="overflow-x:auto;margin-top:8px"><table style="width:100%;font-size:.75rem;border-collapse:collapse"><thead><tr style="background:var(--bg)"><th>代码</th><th>名称</th><th>现价</th><th>近5日</th><th>近20日</th><th>近60日</th><th>趋势</th><th>量能</th><th>营收</th><th>净利</th></tr></thead><tbody>`;
+        allPeers.forEach((p,i)=>{
           let rowStyle=p.is_self?'background:rgba(88,166,255,.08);font-weight:600':'';
-          let c5=(p.chg_5d||0)>=0?'color:var(--rd)':'color:var(--gn)';
-          let c20=(p.chg_20d||0)>=0?'color:var(--rd)':'color:var(--gn)';
+          let c=(v)=>v>=0?'color:var(--rd)':'color:var(--gn)';
+          let sgn=(v)=>v>0?'+':'';
           let tC=p.trend==='上升'?'color:var(--rd)':p.trend==='下降'?'color:var(--gn)':p.trend==='当前'?'color:var(--bl)':'';
           h+=`<tr style="${rowStyle}"><td style="padding:5px 8px;border:1px solid var(--bd)">${p.code}</td>
-            <td style="padding:5px 8px;border:1px solid var(--bd)">${p.name}</td>
+            <td style="padding:5px 8px;border:1px solid var(--bd)">${p.name}${p.is_self?' (你查询的)':''}</td>
             <td style="padding:5px 8px;border:1px solid var(--bd)">${p.price||'-'}</td>
-            <td style="padding:5px 8px;border:1px solid var(--bd);${c5}">${p.chg_5d!=null?(p.chg_5d>0?'+':'')+p.chg_5d.toFixed(1)+'%':'-'}</td>
-            <td style="padding:5px 8px;border:1px solid var(--bd);${c20}">${p.chg_20d!=null?(p.chg_20d>0?'+':'')+p.chg_20d.toFixed(1)+'%':'-'}</td>
+            <td style="padding:5px 8px;border:1px solid var(--bd);${c(p.chg_5d||0)}">${p.chg_5d!=null?sgn(p.chg_5d)+p.chg_5d.toFixed(1)+'%':'-'}</td>
+            <td style="padding:5px 8px;border:1px solid var(--bd);${c(p.chg_20d||0)}">${p.chg_20d!=null?sgn(p.chg_20d)+p.chg_20d.toFixed(1)+'%':'-'}</td>
+            <td style="padding:5px 8px;border:1px solid var(--bd);${c(p.chg_60d||0)}">${p.chg_60d!=null?sgn(p.chg_60d)+p.chg_60d.toFixed(1)+'%':'-'}</td>
             <td style="padding:5px 8px;border:1px solid var(--bd);${tC}">${p.trend||'-'}</td>
+            <td style="padding:5px 8px;border:1px solid var(--bd)">${p.vol_level||'-'}</td>
             <td style="padding:5px 8px;border:1px solid var(--bd)">${p.revenue||'-'}</td>
             <td style="padding:5px 8px;border:1px solid var(--bd)">${p.profit||'-'}</td></tr>`;
         });
