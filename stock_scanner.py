@@ -1564,11 +1564,11 @@ def fetch_fundamental_data(code, market='A'):
     except:
         pass
 
-    # === 3. 财务数据(仅最新1年年报, 提速) ===
+    # === 3. 财务数据(最近3年年报，保留趋势对比) ===
     year = datetime.now().year
     annual_data = {}
-    # 只查最新1年
-    for y in [year-1]:
+
+    for y in range(year-1, year-4, -1):
         yr_data = {}
         try:
             rs = bs.query_profit_data(bs_code, year=y, quarter=4)
