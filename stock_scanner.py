@@ -1771,12 +1771,17 @@ def fetch_board_and_peers(code, industry_name):
             stock_list = fetch_a_stock_list()
             peers_found = []
             for s in stock_list:
-                if len(peers_found) >= 4: break
+                if len(peers_found) >= 6: break
                 if s['code'] == code: continue
-                # 用完整行业名匹配(不用代码段)
-                ind_full = industry_name.replace('行业','').replace('制造','').strip()
-                ind_kws = [ind_full] + ([ind_full[:2]] if len(ind_full)>=3 else [])
-                if any(k in s.get('name', '') for k in ind_kws):
+                # 用行业关键词匹配(完整名+前2字+单字+上级行业)
+                ind_clean = industry_name.replace('行业','').replace('制造','').replace('材料','').replace('股份','').replace('科技','').strip()
+                all_kws = {ind_clean}
+                if len(ind_clean) >= 2: all_kws.add(ind_clean[:2])
+                if result.get('industry_detail'):
+                    for part in result['industry_detail'].split(' → '):
+                        p = part.replace('行业','').strip()
+                        if p and len(p) >= 2: all_kws.add(p)
+                if any(k and k in s.get('name', '') for k in all_kws if k):
                     # 快速获取近5日价格
                     p = 0; chg5 = 0; chg20 = 0; trend = '-'
                     try:
