@@ -31,38 +31,6 @@ def log(msg):
     print(s)
     if len(LOG) > 500: LOG.pop(0)
 
-# ========== baostock后台查询队列(解决并发冲突) ==========
-import queue, uuid
-_bs_queue = queue.Queue()
-_bs_task_results = {}
-_bs_worker_running = True
-
-def _bs_worker_thread():
-    """独立线程处理所有baostock查询，避免并发死锁"""
-    while _bs_worker_running:
-        try:
-            task_id, fn, args, kwargs = _bs_queue.get(timeout=1)
-            try:
-                result = fn(*args, **kwargs)
-                _bs_task_results[task_id] = ('ok', result)
-            except Exception as e:
-                _bs_task_results[task_id] = ('err', str(e))
-        except queue.Empty:
-            continue
-        except: pass
-
-threading.Thread(target=_bs_worker_thread, daemon=True).start()
-
-def _bs_submit(fn, *args, **kwargs):
-    """提交baostock任务，等待结果（非阻塞等待，让出CPU）"""
-    task_id = str(uuid.uuid4())[:8]
-    _bs_queue.put((task_id, fn, args, kwargs))
-    while task_id not in _bs_task_results:
-        time.sleep(0.02)  # 20ms轮询，不占CPU
-    status, result = _bs_task_results.pop(task_id)
-    if status == 'err': raise Exception(result)
-    return result
-
 # ========== 缓存 ==========
 _cache = {}
 _cache_lock = threading.Lock()
@@ -204,7 +172,7 @@ def fetch_stock_history(code, market='A', days=120):
             bs_code = f'sh.{code}' if code.startswith('6') else f'sz.{code}'
             end = datetime.now().strftime('%Y-%m-%d')
             start = (datetime.now() - timedelta(days=days+30)).strftime('%Y-%m-%d')
-            rs = _bs_submit(bs.query_history_k_data_plus, bs_code,
+            rs = bs.query_history_k_data_plus(bs_code,
                 'date,open,close,high,low,volume,amount,turn,pctChg',
                 start_date=start, end_date=end, frequency='d', adjustflag='2')
             if rs.error_code != '0': return None
@@ -641,7 +609,7 @@ def analyze_stock(stock, market='A', patterns=None):
         patterns = ['bottom_divergence','uptrend','first_limit_up',
                     'consecutive_limit_up','top_divergence','bottom_launch',
                     'potential_first_board','potential_continue_board']
-    h = fetch_stock_history(stock['code'], market, 50)
+    h = fetch_stock_history(stock['code'], market, 60)
     if h is None or len(h['close']) < 30: return None
     df = pd.DataFrame({'open':h['open'],'close':h['close'],'high':h['high'],
                        'low':h['low'],'volume':h['volume'],
@@ -729,7 +697,7 @@ def api_scan():
     data = request.get_json() or {}
     markets = data.get('markets', ['A'])
     patterns = data.get('patterns', None)
-    batch_size = data.get('batch_size', 50)  # 每批扫50只，并发后约15-20秒
+    batch_size = data.get('batch_size', 100)  # 每批扫100只，直连约15-20秒
     offset = data.get('offset', 0)  # 起始位置
 
     t0 = time.time()
