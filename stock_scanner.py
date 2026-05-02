@@ -34,12 +34,13 @@ def log(msg):
 # ========== 缓存 ==========
 _cache = {}
 _cache_lock = threading.Lock()
+_bs_lock = threading.Lock()  # 防止并发抢baostock连接
 
 def get_cache(k):
     with _cache_lock:
         if k in _cache:
             d, t = _cache[k]
-            if time.time() - t < 600: return d
+            if time.time() - t < 300: return d  # 5分钟缓存，兼顾实时性
     return None
 
 def set_cache(k, d):
@@ -714,19 +715,12 @@ def api_scan():
         scanned += len(batch)
         log(f"扫描: {market} offset={offset} batch={batch_size}")
 
-        # 并发分析(3线程)
-    def _analyze_one(args):
-        s, mkt, pats = args
-        try: return analyze_stock(s, mkt, pats)
-        except: return None
-
-    with ThreadPoolExecutor(max_workers=3) as executor:
-        futures = {executor.submit(_analyze_one, (s, market, patterns)): s for s in batch}
-        for f in as_completed(futures):
-            try:
-                a = f.result()
-                if a: results.append(a)
-            except: pass
+        # 排队分析(单线程+锁保护，避免baostock并发死锁)
+    for s in batch:
+        try:
+            a = analyze_stock(s, market, patterns)
+            if a: results.append(a)
+        except: pass
 
     results.sort(key=lambda x: (len(x['patterns']),
                  max((p.get('strength',0) for p in x['patterns']),default=0)), reverse=True)
