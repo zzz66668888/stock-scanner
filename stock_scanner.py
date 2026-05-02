@@ -47,14 +47,26 @@ def set_cache(k, d):
 
 # ========== 数据获取 ==========
 
-def init_baostock():
+_bs_logged_in = False
+_bs_fail_count = 0
+
+def ensure_baostock():
+    """确保baostock已登录，失败自动重连"""
+    global _bs_logged_in, _bs_fail_count
+    if _bs_logged_in and _bs_fail_count < 5:
+        return True
     try:
         bs.login()
-        log("baostock登录成功")
+        _bs_logged_in = True
+        _bs_fail_count = 0
         return True
-    except Exception as e:
-        log(f"baostock登录失败: {e}")
+    except:
+        _bs_fail_count += 1
+        _bs_logged_in = False
         return False
+
+def init_baostock():
+    return ensure_baostock()
 
 def fetch_a_stock_list():
     """获取全部A股列表"""
@@ -175,7 +187,9 @@ def fetch_stock_history(code, market='A', days=120):
             rs = bs.query_history_k_data_plus(bs_code,
                 'date,open,close,high,low,volume,amount,turn,pctChg',
                 start_date=start, end_date=end, frequency='d', adjustflag='2')
-            if rs.error_code != '0': return None
+            if rs.error_code != '0':
+                ensure_baostock()  # 自动重连
+                return None
             data = rs.get_data()
             if data is None or len(data) < 20: return None
             result = {
@@ -658,13 +672,26 @@ def index():
 
 @app.route('/api/health')
 def api_health():
-    """快速健康检查"""
-    ok = True
-    try: bs.login(); bs_ok = True
-    except: bs_ok = False; ok = False
-    try: sl = fetch_a_stock_list(); list_ok = len(sl)>0
-    except: list_ok = False; ok = False
-    return jsonify({'ok': ok, 'baostock': bs_ok, 'stock_list': list_ok, 'stock_count': len(sl) if list_ok else 0})
+    """全面健康检查"""
+    ok = True; details = {}
+    # baostock连接
+    try:
+        ensure_baostock()
+        details['baostock'] = 'OK'
+    except Exception as e:
+        details['baostock'] = f'FAIL: {e}'; ok = False
+    # 缓存状态
+    details['cache_entries'] = len(_cache)
+    details['cache_size'] = f'{sum(len(str(v)) for v in _cache.values())//1024}KB'
+    # 内存
+    try:
+        import psutil
+        mem = psutil.Process().memory_info().rss // 1024 // 1024
+        details['memory_mb'] = mem
+        if mem > 400: details['memory_warning'] = '接近512MB上限，建议重启'
+    except: details['memory_mb'] = '未知'
+    details['baostock_fails'] = _bs_fail_count
+    return jsonify({'ok': ok, 'details': details})
 
 @app.route('/api/test')
 def api_test():
@@ -694,11 +721,19 @@ def api_test():
 @app.route('/api/scan', methods=['POST'])
 def api_scan():
     global SCAN_STATUS
+    # 缓存超过10000条时清理旧的（防止内存爆炸）
+    if len(_cache) > 10000:
+        with _cache_lock:
+            keys = sorted(_cache.keys(), key=lambda k: _cache[k][1])  # 按时间排序
+            for old_key in keys[:2000]:  # 删最旧的2000条
+                if old_key in _cache: del _cache[old_key]
+        log(f"缓存清理: {len(_cache)}条")
+
     data = request.get_json() or {}
     markets = data.get('markets', ['A'])
     patterns = data.get('patterns', None)
-    batch_size = data.get('batch_size', 100)  # 每批扫100只，直连约15-20秒
-    offset = data.get('offset', 0)  # 起始位置
+    batch_size = data.get('batch_size', 100)
+    offset = data.get('offset', 0)
 
     t0 = time.time()
     results = []; total_available = 0; scanned = 0
