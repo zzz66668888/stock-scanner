@@ -9,6 +9,7 @@
 """
 
 import json, time, sys, traceback, threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 import numpy as np
 import pandas as pd
@@ -608,7 +609,7 @@ def analyze_stock(stock, market='A', patterns=None):
         patterns = ['bottom_divergence','uptrend','first_limit_up',
                     'consecutive_limit_up','top_divergence','bottom_launch',
                     'potential_first_board','potential_continue_board']
-    h = fetch_stock_history(stock['code'], market, 90)
+    h = fetch_stock_history(stock['code'], market, 50)
     if h is None or len(h['close']) < 30: return None
     df = pd.DataFrame({'open':h['open'],'close':h['close'],'high':h['high'],
                        'low':h['low'],'volume':h['volume'],
@@ -690,59 +691,55 @@ def api_test():
         results['港股通标的'] = f'FAIL: {e}'
     return jsonify({'results':results,'logs':LOG[-20:]})
 
-SCAN_RESULTS = []  # 后台扫描结果存储
-
 @app.route('/api/scan', methods=['POST'])
 def api_scan():
-    global SCAN_STATUS, SCAN_RESULTS
-    if SCAN_STATUS['running']:
-        return jsonify({'success':False,'message':'扫描进行中','status':SCAN_STATUS})
-
+    global SCAN_STATUS
     data = request.get_json() or {}
     markets = data.get('markets', ['A'])
     patterns = data.get('patterns', None)
-    limit = data.get('limit', None)
+    batch_size = data.get('batch_size', 50)  # 每批扫50只，并发后约15-20秒
+    offset = data.get('offset', 0)  # 起始位置
 
-    SCAN_STATUS = {'running':True,'progress':0,'total':0,'matched':0}
-    SCAN_RESULTS = []
+    t0 = time.time()
+    results = []; total_available = 0; scanned = 0
 
-    def bg_scan():
-        global SCAN_STATUS, SCAN_RESULTS
-        results = []
-        for market in markets:
+    for market in markets:
+        try:
+            sl = fetch_a_stock_list() if market == 'A' else fetch_hk_connect_list()
+        except: continue
+        if not sl: continue
+        sl = sorted(sl, key=lambda x: x.get('amount', 0), reverse=True)
+        total_available += len(sl)
+        batch = sl[offset:offset+batch_size]
+        scanned += len(batch)
+        log(f"扫描: {market} offset={offset} batch={batch_size}")
+
+        # 并发分析(3线程)
+    def _analyze_one(args):
+        s, mkt, pats = args
+        try: return analyze_stock(s, mkt, pats)
+        except: return None
+
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        futures = {executor.submit(_analyze_one, (s, market, patterns)): s for s in batch}
+        for f in as_completed(futures):
             try:
-                sl = fetch_a_stock_list() if market == 'A' else fetch_hk_connect_list()
-            except: continue
-            if not sl: continue
-            SCAN_STATUS['total'] += len(sl)
-            scan_list = sl[:limit] if limit else sl
-            log(f"后台扫描: {market} {len(scan_list)}只")
-            for i, s in enumerate(scan_list):
-                try:
-                    a = analyze_stock(s, market, patterns)
-                    if a: results.append(a)
-                except: pass
-                SCAN_STATUS['progress'] = i+1
-                SCAN_STATUS['matched'] = len(results)
-                if (i+1) % 100 == 0: log(f"  进度: {i+1}/{len(scan_list)}, 匹配{len(results)}只")
-        results.sort(key=lambda x: (len(x['patterns']),
-                     max((p.get('strength',0) for p in x['patterns']),default=0)), reverse=True)
-        SCAN_RESULTS = results
-        SCAN_STATUS['running'] = False
-        log(f"后台扫描完成: 匹配{len(results)}只")
+                a = f.result()
+                if a: results.append(a)
+            except: pass
 
-    threading.Thread(target=bg_scan, daemon=True).start()
-    log(f"后台扫描已启动: 市场={markets}")
-    return jsonify({'success':True,'message':'扫描已在后台启动','status':SCAN_STATUS})
+    results.sort(key=lambda x: (len(x['patterns']),
+                 max((p.get('strength',0) for p in x['patterns']),default=0)), reverse=True)
+    elapsed = time.time() - t0
+    has_more = (offset + batch_size) < total_available
 
-@app.route('/api/scan_results')
-def api_scan_results():
-    """获取后台扫描的当前结果"""
-    global SCAN_STATUS, SCAN_RESULTS
+    SCAN_STATUS = {'running':False, 'progress': offset+batch_size, 'total': total_available, 'matched': len(results)}
+    log(f"分页扫描: offset={offset}, 匹配{len(results)}只, 耗时{elapsed:.1f}s, 还有更多={has_more}")
+
     return jsonify({
-        'status': SCAN_STATUS,
-        'results': SCAN_RESULTS,
-        'logs': LOG[-20:]
+        'success':True, 'total_scanned': scanned, 'total_matches': len(results),
+        'total_available': total_available, 'offset': offset, 'has_more': has_more,
+        'results':results, 'logs':LOG[-15:], 'elapsed':round(elapsed,1)
     })
 
 @app.route('/api/position', methods=['POST'])
@@ -2135,47 +2132,60 @@ async function testConn(){
 function startPolling(){stopPolling();polling=setInterval(async()=>{try{let r=await fetch('/api/scan_status'),d=await r.json();if(d.running){document.getElementById('ss').textContent=`${d.progress}/${d.total}`;document.getElementById('sm').textContent=d.matched;let pct=d.total>0?Math.round(d.progress/d.total*100):0;document.getElementById('pfill').style.width=pct+'%'}}catch(e){}},1000)}
 function stopPolling(){if(polling){clearInterval(polling);polling=null}}
 
+let allScanResults=[]; let scanOffset=0; let scanAborted=false;
+
 async function scan(limit){
   if(busy)return;if(mk.length===0){alert('请选择市场');return}if(pt.length===0){alert('请选择形态');return}
-  busy=true;
-  let isFull=limit===null||limit===undefined;
-  document.querySelectorAll('.btn').forEach(b=>{if(b.onclick)b.disabled=true});
+  busy=true;scanAborted=false;allScanResults=[];scanOffset=0;
+  document.getElementById('sb').disabled=true;  // 只禁用扫描按钮，不影响搜索
   document.getElementById('errs').innerHTML='';document.getElementById('pfill').style.width='0%';
   document.getElementById('ss').textContent='0/0';document.getElementById('sm').textContent='0';
-  ss('busy','后台扫描中...');
+  ss('busy','扫描中...');
   document.getElementById('logPanel').style.display='block';
-  document.getElementById('logPanel').textContent='启动后台扫描...';
-  try{
-    let body={markets:mk,patterns:pt};if(!isFull)body.limit=limit;
-    let r=await fetch('/api/scan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
-    let d=await r.json();
-    if(!d.success){ss('err','失败');document.getElementById('errs').innerHTML=`<div class="fp">${d.message}</div>`;busy=false;return}
-    // 开始轮询结果
-    let pollCount=0;
-    let poller=setInterval(async()=>{
-      pollCount++;
-      try{
-        let r2=await fetch('/api/scan_results'),d2=await r2.json();
-        let st=d2.status||{};
-        document.getElementById('ss').textContent=`${st.progress||0}/${st.total||0}`;
-        document.getElementById('sm').textContent=st.matched||0;
-        let pct=st.total>0?Math.round(st.progress/st.total*100):0;
-        document.getElementById('pfill').style.width=pct+'%';
-        if(d2.logs)document.getElementById('logPanel').textContent=d2.logs.join('\n');
-        if(d2.results)render(d2.results);
-        if(!st.running){
-          clearInterval(poller);
-          document.getElementById('stm').textContent=pollCount+'s';
-          document.getElementById('rc').textContent='共 '+(st.matched||0)+' 只匹配';
-          document.getElementById('pfill').style.width='100%';
-          ss('ok','扫描完成');
-          busy=false;document.querySelectorAll('.btn').forEach(b=>b.disabled=false);
-        }
-      }catch(e){clearInterval(poller);ss('err','失败');busy=false}
-    },2000);
-  }catch(e){ss('err','失败');document.getElementById('errs').innerHTML=`<div class="fp">扫描失败: ${e.message}</div>`;busy=false}
-  let iv=parseInt(document.getElementById('ar').value);if(timer)clearInterval(timer);if(iv>0)timer=setInterval(()=>scan(limit),iv*1000);
+  let batchSize=limit||30; let totalTime=0;
+
+  async function scanBatch(){
+    if(scanAborted){finishScan();return}
+    try{
+      let body={markets:mk,patterns:pt,batch_size:batchSize,offset:scanOffset};
+      let r=await fetch('/api/scan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+      let d=await r.json();
+      if(!d.success){ss('err','失败');busy=false;return}
+      totalTime+=d.elapsed||0;
+      allScanResults=allScanResults.concat(d.results||[]);
+      // 去重排序
+      let seen=new Set();allScanResults=allScanResults.filter(r=>{let k=r.code+r.market;if(seen.has(k))return false;seen.add(k);return true});
+      allScanResults.sort((a,b)=>b.patterns.length-a.patterns.length||(b.patterns[0]?.strength||0)-(a.patterns[0]?.strength||0));
+      scanOffset=d.offset+batchSize;
+      let total=d.total_available||0;
+      let pct=total>0?Math.round(Math.min(scanOffset,total)/total*100):0;
+      document.getElementById('ss').textContent=`${Math.min(scanOffset,total)}/${total}`;
+      document.getElementById('sm').textContent=allScanResults.length;
+      document.getElementById('stm').textContent=totalTime.toFixed(0)+'s';
+      document.getElementById('pfill').style.width=pct+'%';
+      if(d.logs)document.getElementById('logPanel').textContent=d.logs.join('\n');
+      document.getElementById('rc').textContent='已匹配 '+allScanResults.length+' 只';
+      render(allScanResults);
+      if(d.has_more&&!scanAborted){
+        setTimeout(scanBatch,500);  // 继续下一批
+      }else{
+        finishScan();
+      }
+    }catch(e){ss('err','失败');busy=false}
+  }
+
+  function finishScan(){
+    scanAborted=true;
+    document.getElementById('rc').textContent='共 '+allScanResults.length+' 只匹配';
+    document.getElementById('pfill').style.width='100%';
+    ss('ok','扫描完成');
+    busy=false;document.getElementById('sb').disabled=false;
+  }
+
+  await scanBatch();
 }
+
+function stopAR(){scanAborted=true;if(timer){clearInterval(timer);timer=null}document.getElementById('stb').style.display='none'}
 
 function render(rs){
   let tb=document.getElementById('rb');
