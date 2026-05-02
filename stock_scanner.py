@@ -691,6 +691,15 @@ def api_health():
         if mem > 400: details['memory_warning'] = '接近512MB上限，建议重启'
     except: details['memory_mb'] = '未知'
     details['baostock_fails'] = _bs_fail_count
+    # 快速测试各API
+    try:
+        h = fetch_stock_history('000001', 'A', 30)
+        details['kline_test'] = f'OK ({len(h["close"])}条)' if h and len(h.get('close',[]))>0 else 'EMPTY'
+    except Exception as e: details['kline_test'] = f'FAIL: {e}'
+    try:
+        detail = fetch_fundamental_data('000001')
+        details['fund_test'] = f'OK (行业:{detail.get("industry","?")})' if detail else 'EMPTY'
+    except Exception as e: details['fund_test'] = f'FAIL: {e}'
     return jsonify({'ok': ok, 'details': details})
 
 @app.route('/api/test')
